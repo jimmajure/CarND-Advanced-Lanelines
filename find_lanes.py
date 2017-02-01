@@ -105,15 +105,11 @@ def gradient_mag_thresh(gray, ksize=3, mask_range=(0,255)):
 
 def gradient_dir_thresh(gray, ksize=3, mask_range=(0,255)):
     return mask(gradient_direction(gray, ksize),mask_range)
-
-def plot_image(img, title):
-    global figure
-    plt.figure(figure)
-    figure+=1
-    plt.title(title)
-    plt.imshow(img, cmap="gray")
     
 def plot_images(imgs):
+    '''
+    A utility that plots a collection of images in a matrix. 
+    '''
     cols = int(np.ceil(np.sqrt(len(imgs))))
     rows = int(len(imgs)/cols)
     if len(imgs) % cols > 0:
@@ -258,7 +254,6 @@ def find_lane(img, c, w_max = 201):
         total_prob = np.sum(new_prob)
         if total_prob > 0:
             prob_img[ln] = new_prob
-#                 print("line: {}; sum(prob_img)={}; sum(new_prob)={}".format(ln, np.sum(prob_img), np.sum(new_prob)))
         
             # put the probablity in where the highest was...
             c = max_window(new_prob)
@@ -309,33 +304,55 @@ class Lane(object):
         self.curvatures = None
         
     def fit_lane(self, img):
+        '''
+        Fit a polynomial to the x and y points that represent
+        lane-line pixels in the provided image.
+        '''
         fit,fitm = None,None
+        
+        # generate the indices for  cells with a value of 1...
         rind,cind = np.indices(img.shape)
         xs = cind[img[rind,cind]==1]
         ys = rind[img[rind,cind]==1]
+
         if len(xs) > 0:
             fit = np.polyfit(ys, xs, 2)
             fitm = np.polyfit(ys*self.ym_per_pix, xs*self.xm_per_pix, 2)
+            
         return fit,fitm
     
     def curvature(self, val, fit):
         return ((1 + (2*fit[0]*val + fit[1])**2)**1.5) /np.absolute(2*fit[0])
     
     def add_fit(self, left_fit, left_fitm, right_fit, right_fitm):
+        '''
+        Add the provided polynomial fits to the Lane, sanity checking to make
+        sure that the curvature of the two lanes is within tolerance and that
+        the lines are roughly parallel.
+        
+        If the lines appear to be incorrect, increment the bad counter. If there
+        are too many consecutive bad frames, set the starting points to None.
+        '''
         left_fitx, right_fitx = self.__genxs(left_fit, right_fit)
         
         diff = right_fitx - left_fitx
         
         diff = diff[[self.image_size[1]-1,int(self.image_size[1]/2),0]]
+        
+        # calculate the change in width from the beginning of the image to its midpoint
+        diff01 = np.abs(diff[0]-diff[1])
+        
+        #save the diffs for some data analysis...
         if self.diffs != None:
             self.diffs = np.concatenate((self.diffs, diff))
         else:
             self.diffs = diff
 
-        
+        # calculate the curvatures
         self.left_c = self.curvature(self.ys[-1], left_fitm)
         self.right_c = self.curvature(self.ys[-1], right_fitm)
         
+        # save the curvatures for some data analysis...
         if self.curvatures != None:
             self.curvatures = np.concatenate((self.curvatures,np.array([self.left_c, self.right_c])))
         else:
@@ -344,7 +361,6 @@ class Lane(object):
         minc = np.abs(np.amin([self.left_c, self.right_c]))
         maxc = np.abs(np.amax([self.left_c, self.right_c]))
 
-        diff01 = np.abs(diff[0]-diff[1])
         result = True
         if maxc < minc*10 and diff01 < 120:
             self.fit_lefts = [left_fit]
@@ -369,8 +385,12 @@ class Lane(object):
         return result
     
     def process_lanes(self, lanes):
+        '''
+        Accept a classified lane image, pull out the lanes, 
+        fit polynomials and add the fits to the Lane.
+        '''
         success = True
-            # get the place to start
+        # get the place to start
         ls,rs = self.get_start_points()
         w_max = 201
         if not ls or not rs:
@@ -446,11 +466,14 @@ class Lane(object):
         return self.left_start, self.right_start
     
 def get_start_point(img):
+    '''
+    Create histogram values to estimate the likely x position of each of the two
+    lane lines.
+    '''
     sums = np.sum(img[400:], axis=0)
     m = int(1280/2)
     left_start = np.argmax(sums[:m])
     right_start = m+np.argmax(sums[m:])
-    print("start: {}, {}".format(left_start, right_start))
     return left_start, right_start
 
 def process_image(img):
@@ -458,6 +481,7 @@ def process_image(img):
     img_und = undistorter.undistort(img)
     # do a perspective transform
     img_pt = per_trans.transform(img_und)
+    # identify possible lane-line pixels
     lanes = filter_image(img_pt)
     lane.process_lanes(lanes)
 
@@ -493,6 +517,3 @@ if __name__ == '__main__':
     
     pickle.dump( lane.diffs, open( "diffs.p", "wb" ) )
     pickle.dump(lane.curvatures, open("curvatures.p","wb"))
-
-
-#     process_image(imread('test_images/test1.jpg'))
