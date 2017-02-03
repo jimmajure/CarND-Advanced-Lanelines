@@ -8,7 +8,7 @@ from find_lanes import imread, plot_images_2d, Undistorter,\
     PerspectiveTransformer, gradient_thresh, gradient_dir_thresh,\
     gradient_mag_thresh, mask, plot_images, gradient, gradient_magnitude, scale,\
     rgb2hls, process_image, step_prob, max_window, Timer, find_lane,\
-    rgb2hsv, rgb2lab
+    rgb2hsv, rgb2lab, Lane, filter_image
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,8 +18,8 @@ from scipy.special.basic import comb
 
 src = np.float32(
     [[100,720],
-     [580,450],
-     [700,450],
+     [585,450],
+     [695,450],
      [1180,720]]
     )
 dest = np.float32(
@@ -91,9 +91,10 @@ def lanes_rsvl(rgb):
     lab,l,a,b = rgb2lab(rgb)
     leq = cv2.equalizeHist(l)
     lmask = mask(leq, (252, 255))
-    
+    beq = cv2.equalizeHist(b)
+    bmask = mask(beq,(252,255))
     comb = np.zeros_like(r)
-    comb[(rmask==1)|(vmask==1)|(lmask==1)] =1
+    comb[(rmask==1)|(vmask==1)|(lmask==1)|(bmask==1)] =1
 
     return comb
 
@@ -149,15 +150,16 @@ def plot_colorspaces(rgb,name):
     
     lab,l,a,b = rgb2lab(rgb)
     leq = cv2.equalizeHist(l)
-    dsp_images= [(name+'_lab',lab),('l',l),('leq',leq),('a',a),('b',b)]
+    beq = cv2.equalizeHist(b)
+    dsp_images= [(name+'_lab',lab),('l',l),('leq',leq),('a',a),('b',b),('beq',beq)]
     plot_images(dsp_images)
     plt.show()
 
 def plot_grayscale(rgb, name):
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     gray_eq = cv2.equalizeHist(gray)
-    grdx = scale(gradient(gray_eq, orient='x', ksize=7))
-    grdmag = scale(gradient_magnitude(gray_eq, ksize=7))
+    grdx = scale(gradient(gray, orient='x', ksize=7))
+    grdmag = cv2.equalizeHist(scale(gradient_magnitude(gray_eq, ksize=7)))
     
     dsp_images= [(name+'_gray',gray),('gray_eq',gray_eq),('gradient',grdx),('gradient mag',grdmag)]
     plot_images(dsp_images)
@@ -177,10 +179,24 @@ def plot_lab(rgb, name):
     plot_images(dsp_images)
     plt.show()
     
+def gen_data(fit, y):
+    return fit[0]*y**2+fit[1]*y+fit[2]
 
+def display_image_with_fits(img, lf, rf):
+    ys = np.array(list(range(720)))
+    xs = gen_data(lf, ys)
+    lines = np.array([xs,ys]).T
+    imgl = np.zeros_like(img)
+    cv2.polylines(imgl,np.int32([lines]),0,(1),50)
+    plt.imshow(imgl, cmap='gray')
+    plt.plot(gen_data(lf,ys),ys,'r')
+    plt.plot(gen_data(rf,ys),ys,'r')
+    plt.show()
+    
 if __name__ == '__main__':
     undistorter = Undistorter('camera_cal/distortion_pickle.p')
     per_trans = PerspectiveTransformer(src, dest, (1280,720))
+    lane = Lane(per_trans)
     image_names = glob.glob('test_images/test*.jpg')
 #     image_names = ['test_images/straight_lines1.jpg','test_images/straight_lines2.jpg']
 #     image_names = ['test_images/test2.jpg']
@@ -192,36 +208,21 @@ if __name__ == '__main__':
 #         plotter = plot_colorspaces
         plotter = plot_rsvl
 #         plotter = plot_lab
-#         plotter = plot_grayscale
-        plotter(img_und, image_name)
+        plotter = plot_grayscale
+#         plotter(img_und, image_name)
 
-        img_lns = lanes_rsvl(img_und)
-        img_pt = per_trans.transform(img_lns)
-        plot_images([("pic",img_und),("pt lane",img_pt)])
+        img_pt = per_trans.transform(img_und)
+        img_lns = filter_image(img_pt)
+        plot_images([("pic",img_und),("pt lane",img_lns)])
         plt.show()
         
         if False:
             timer = Timer()
-            lanes = lanes_rsvl(img_pt)
-            print("lanes_rsvl: {}".format(timer.lap()))
-            left = find_lane(lanes, 315)
-            print("left: {}".format(timer.lap()))
-            left_fit = fit_lane(left)
-            print("left fit: {}".format(timer.lap()))
-            right = find_lane(lanes, 1060)
-            print("right: {}".format(timer.lap()))
-            right_fit = fit_lane(right)
-            print("right fit: {}".format(timer.lap()))
-            dsp_images = [(image_name, lanes),('probs',left)]
-            plot_images(dsp_images)
-       
-            ys = np.array(range(720))*1.
-            left_fitx = left_fit[0]*ys**2 + left_fit[1]*ys + left_fit[2]
-            right_fitx = right_fit[0]*ys**2 + right_fit[1]*ys + right_fit[2]
-               
-            plt.imshow(lanes, cmap="gray")
-            plt.plot(left_fitx, ys, color="red", linewidth=1)
-            plt.plot(right_fitx, ys, color="red", linewidth=1)
+            lf, rf = lane.get_current_fit()
+            if lf != None:
+                display_image_with_fits(img_lns, lf, rf)
+            
+            lane.process_lanes(img_lns)
                
             plt.show()
         

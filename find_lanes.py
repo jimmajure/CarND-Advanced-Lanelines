@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pickle
 from datetime import datetime
+from collections import deque
 
 
 class Undistorter():
@@ -63,7 +64,7 @@ def scale(x, range=(0,255)):
     '''
     pct = lambda x: 1.*(x-np.min(x))/(np.max(x)-np.min(x))
     scale = lambda percent: range[0]+percent*(range[1]-range[0])
-    return scale(pct(x))
+    return np.uint8(scale(pct(x)))
     
 
 def imread(file):
@@ -176,6 +177,8 @@ def max_window(arr):
     '''
     for a given array, find the center of the widest point of 
     the array containing consecutive values of 1.
+    
+    Note: very slow implementation. Not sure if there's a better way.
     '''
     c = 0
     max_c = 0
@@ -215,6 +218,10 @@ def filter_image(rgb):
     hsv v band
     lab l band
     '''
+#     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+#     grdmag = cv2.equalizeHist(scale(gradient(gray, orient='x', ksize=7)))
+#     grdmask = mask(grdmag,(252,255))
+    
     r = rgb[:,:,0]
     req = cv2.equalizeHist(r)
     rmask = mask(req, (252, 255))
@@ -223,15 +230,17 @@ def filter_image(rgb):
     veq = cv2.equalizeHist(v)
     vmask = mask(veq, (252, 255))
     
-    _,l,_,_ = rgb2lab(rgb)
+    _,l,_,b = rgb2lab(rgb)
     leq = cv2.equalizeHist(l)
     lmask = mask(leq, (252, 255))
+    beq = cv2.equalizeHist(b)
+    bmask = mask(beq, (252, 255))
     
     comb = np.zeros_like(r)
-    comb[(rmask==1)|(vmask==1)|(lmask==1)] = 1
+    comb[(rmask==1)|(vmask==1)|(lmask==1)|(bmask==1)] = 1
     return comb
 
-def find_lane(img, c, w_max = 201):
+def find_lane(img, c, w_init = 201):
     '''
     Find a lane line centered on the x value c in a binary lane image.
     
@@ -244,8 +253,9 @@ def find_lane(img, c, w_max = 201):
     window size for the next row.
     '''
     prob_img = np.zeros_like(img, dtype=np.float32)
-    
-    w = w_max
+    w_max = 201
+    w_min = 35
+    w = w_init
     prob = np.array([0.]*1280)
     for ln in range(719,0,-1):
         prob = step_prob(c,w, prob)
@@ -257,10 +267,22 @@ def find_lane(img, c, w_max = 201):
         
             # put the probablity in where the highest was...
             c = max_window(new_prob)
-            w = 35
+            w = w_min
         else:
             w = np.minimum(w_max, w+10)
     return prob_img
+
+def find_lane_fit(img, fit):
+
+    fitx = lambda y: fit[0]*y**2 + fit[1]*y + fit[2]
+
+    band = np.zeros_like(img)
+    ys = np.array(list(range(720)))
+    xs = fitx(ys)
+    lines = np.array([xs,ys]).T
+    cv2.polylines(band,np.int32([lines]),0,(1),50)
+    
+    return (band * img)
 
 class Lane(object):
     '''
@@ -282,9 +304,9 @@ class Lane(object):
         # the perspective transform object
         self.per_trans = per_trans
         # list of recent fits for the left lane line
-        self.fit_lefts = []
+        self.fit_lefts = deque(maxlen=3)
         #list of recent fits for the right lane line
-        self.fit_rights = []
+        self.fit_rights = deque(maxlen=3)
         # the current number of consecutive bad frames
         self.bad = 0
         # the maximum number of consecutive bad frames
@@ -300,6 +322,7 @@ class Lane(object):
         # m/pixel in the x axis
         self.xm_per_pix = 3.7/700 
         
+        self.position = 0
         self.diffs = None
         self.curvatures = None
         
@@ -362,9 +385,9 @@ class Lane(object):
         maxc = np.abs(np.amax([self.left_c, self.right_c]))
 
         result = True
-        if maxc < minc*10 and diff01 < 120:
-            self.fit_lefts = [left_fit]
-            self.fit_rights = [right_fit]
+        if maxc < minc*10: #and diff01 < 120:
+            self.fit_lefts.appendleft(left_fit)
+            self.fit_rights.appendleft(right_fit)
             
             seconds_per_hour = 60.0*60.0
             frames_per_second = 30.0
@@ -384,34 +407,56 @@ class Lane(object):
         
         return result
     
+    def get_current_fit(self):
+        if len(self.fit_lefts) > 0 and len(self.fit_rights)>0:
+            lf = self.fit_lefts[-1]
+            rf = self.fit_rights[-1]
+            return lf, rf
+        else:
+            return None, None
+            
+    def get_average_fit(self):
+        if len(self.fit_lefts) > 0 and len(self.fit_rights)>0:
+            lf = np.mean(np.array(self.fit_lefts), axis=0)
+            rf = np.mean(np.array(self.fit_rights), axis=0)
+            return lf, rf
+        else:
+            return None, None
+            
+    
     def process_lanes(self, lanes):
         '''
         Accept a classified lane image, pull out the lanes, 
         fit polynomials and add the fits to the Lane.
         '''
         success = True
+        left, right = None,None
         # get the place to start
-        ls,rs = self.get_start_points()
-        w_max = 201
-        if not ls or not rs:
+        lf,rf = self.get_current_fit()
+        if self.bad < 2 and lf != None:
+            left = find_lane_fit(lanes, lf)
+            right = find_lane_fit(lanes, rf)
+        else:
             ls,rs = get_start_point(lanes)
-            w_max = 201
-
-        if ls and rs:
-            # find the left lane line
-            left = find_lane(lanes, ls, w_max)
+            if ls and rs:
+                # find the left lane line
+                left = find_lane(lanes, ls)
+                #find the right lane line
+                right = find_lane(lanes, rs)
+                
+            
+        # we have good starting points, so start small
+        if None != left:
             left_fit,left_fitm = self.fit_lane(left)
-            
-            #find the right lane line
-            right = find_lane(lanes, rs, w_max)
+                
+                #find the right lane line
             right_fit,right_fitm = self.fit_lane(right)
-            
-            # add the current fits
+                
+                # add the current fits
             success = right_fit != None and left_fit != None and \
                 self.add_fit(left_fit, left_fitm, right_fit, right_fitm)
         else:
             success = False
-#             imwrite("test_images/error.jpg", img)
 
         if success:
             # reset the consecutive bad counter
@@ -421,13 +466,10 @@ class Lane(object):
             self.total_bad += 1
             self.max_bad = np.amax((self.max_bad, self.bad))
 
-            # if we've had 2 bad frames in a row, look in the 
-            if self.bad > 2:
-                self.left_start = None
-                self.right_start = None
-
         print("\ncurvature:      {: >10.3f}|{: >10.3f}".format(self.left_c, self.right_c))
         print("bad/max/total: {}/{}/{}".format(self.bad,self.max_bad, self.total_bad))
+        
+        return success
 
         
     def __genxs(self, left_fit, right_fit, units='pixel'):
@@ -444,7 +486,8 @@ class Lane(object):
         warp_zero = np.zeros((self.image_size[1],self.image_size[0])).astype(np.uint8)
         color_warp = np.dstack((warp_zero, warp_zero, warp_zero))
         
-        left_fitx, right_fitx = self.__genxs(self.fit_lefts[-1], self.fit_rights[-1])
+        lf,rf = self.get_average_fit()
+        left_fitx, right_fitx = self.__genxs(lf, rf)
         # Recast the x and y points into usable format for cv2.fillPoly()
         pts_left = np.array([np.transpose(np.vstack([left_fitx, self.ys]))])
         pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, self.ys])))])
@@ -457,13 +500,11 @@ class Lane(object):
         # Warp the blank back to original image space using inverse perspective matrix (Minv)
         newwarp = self.per_trans.transformInverse(color_warp)
         font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(newwarp,"curvaturewhat: {: >10.3f}|{: >10.3f}".format(self.left_c, self.right_c),(500,620), font, 0.5,(255,255,255),2)
+        cv2.putText(newwarp,"curvature: {: >10.3f}|{: >10.3f}".format(self.left_c, self.right_c),(500,620), font, 0.5,(255,255,255),2)
         cv2.putText(newwarp,"lane position: {: >10.3f}".format(self.position),(500,650), font, 0.5,(255,255,255),2)
 
         return newwarp
     
-    def get_start_points(self):
-        return self.left_start, self.right_start
     
 def get_start_point(img):
     '''
@@ -477,25 +518,30 @@ def get_start_point(img):
     return left_start, right_start
 
 def process_image(img):
+    global counter
     # undistort the image
     img_und = undistorter.undistort(img)
     # do a perspective transform
     img_pt = per_trans.transform(img_und)
     # identify possible lane-line pixels
     lanes = filter_image(img_pt)
-    lane.process_lanes(lanes)
-
+    if not lane.process_lanes(lanes):
+#         imwrite("test_images/bad{}.jpg".format(lane.total_bad), img)
+        pass
     
+    counter += 1
+    imwrite("test_images/frame{}.jpg".format(counter), img)
     overlay_img = lane.generate_overlay()
     result = cv2.addWeighted(img_und, 1, overlay_img, 0.3, 0)
     return result
 
 if __name__ == '__main__':
+    counter = 0
     undistorter = Undistorter('camera_cal/distortion_pickle.p')
     src = np.float32(
         [[100,720],
-         [580,450],
-         [700,450],
+         [585,450],
+         [695,450],
          [1180,720]]
         )
     dest = np.float32(
@@ -510,7 +556,7 @@ if __name__ == '__main__':
     
     from moviepy.editor import VideoFileClip
  
-    yellow_output = 'project.mp4'
+    yellow_output = 'project_out.mp4'
     clip2 = VideoFileClip('project_video.mp4')
     yellow_clip = clip2.fl_image(process_image)
     yellow_clip.write_videofile(yellow_output, audio=False)
